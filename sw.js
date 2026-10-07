@@ -1,4 +1,4 @@
-const CACHE="estimo-lab-v3";
+const CACHE="estimo-lab-v4";
 const ASSETS=["./","index.html","styles.css","app.js","data/chapter1.js","manifest.webmanifest","icon.svg"];
 
 self.addEventListener("install",event=>{
