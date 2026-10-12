@@ -1,22 +1,27 @@
 const $=s=>document.querySelector(s);
 const app=$("#app");
 const chapters=window.ESTIMO_CHAPTERS||[];
-const SB=window.supabase?.createClient(window.ESTIMO_CONFIG?.supabaseUrl,window.ESTIMO_CONFIG?.supabaseKey);
+const API_URL=(window.ESTIMO_CONFIG?.supabaseUrl||"")+"/functions/v1/estimo-data";
 let currentChapter=localStorage.getItem("estimo_current_chapter")||(chapters[0]?.id||null);
 let currentUser=null;
 let currentProfile=null;
-function updateAuthUI(){const b=$("#authBtn");if(!b)return;if(!currentUser){b.textContent="Accedi";b.className="account-btn";return;}const teacher=currentProfile?.role==="teacher";b.textContent=teacher?"👩‍🏫 Docente":"👤 Studente";b.className="account-btn "+(teacher?"teacher":"student")}
-const state={score:+(localStorage.getItem("estimo_score")||0),answered:+(localStorage.getItem("estimo_answered")||0),correct:+(localStorage.getItem("estimo_correct")||0),completedLessons:JSON.parse(localStorage.getItem("estimo_lessons")||"[]")};
-function saveState(){localStorage.setItem("estimo_score",state.score);localStorage.setItem("estimo_answered",state.answered);localStorage.setItem("estimo_correct",state.correct);localStorage.setItem("estimo_lessons",JSON.stringify(state.completedLessons));syncProgress().catch(()=>{})}
-async function syncProgress(){if(!SB||!currentUser)return;const c=ch();await SB.from("study_progress").upsert({user_id:currentUser.id,chapter_id:c.id,completed_lessons:state.completedLessons.filter(x=>x.startsWith(c.id+":")),answered:state.answered,correct:state.correct,score:state.score,updated_at:new Date().toISOString()},{onConflict:"user_id,chapter_id"})}
-async function loadRemoteProgress(){if(!SB||!currentUser)return;const c=ch();const {data}=await SB.from("study_progress").select("*").eq("user_id",currentUser.id).eq("chapter_id",c.id).maybeSingle();if(data){state.answered=data.answered||0;state.correct=data.correct||0;state.score=data.score||0;const localOther=state.completedLessons.filter(x=>!x.startsWith(c.id+":"));state.completedLessons=localOther.concat(Array.isArray(data.completed_lessons)?data.completed_lessons:[]);saveState()}}
-async function recordAttempt(mode,score,total){if(!SB||!currentUser)return;await SB.from("quiz_attempts").insert({user_id:currentUser.id,chapter_id:ch().id,mode,score,total,correct:score})}
-function authView(message=""){currentUser=null;currentProfile=null;updateAuthUI();document.querySelector(".bottom-nav").style.display="none";app.innerHTML=`<section class="hero"><div class="kicker">Accesso obbligatorio</div><h1>ESTIMO LAB</h1><p>Studenti e docente entrano tutti da questa schermata.</p></section><div class="card auth-card"><h3>Accedi con la tua email</h3><p class="small">Inserisci l'indirizzo email che vuoi usare per ESTIMO LAB. Riceverai un link personale di accesso. L'account docente viene riconosciuto automaticamente; tutte le altre email entrano come studenti.</p><label>Email</label><input id="loginEmail" type="email" placeholder="nome@scuola.it"><button class="primary" style="margin-top:12px" onclick="sendMagicLink()">Invia link di accesso</button>${message?`<div class="feedback">${esc(message)}</div>`:""}</div>`}
-async function sendMagicLink(){const email=($("#loginEmail")?.value||"").trim();if(!email)return authView("Inserisci un indirizzo email.");const {error}=await SB.auth.signInWithOtp({email,options:{emailRedirectTo:"https://estimo-lab.vercel.app",shouldCreateUser:true}});authView(error?("Errore: "+error.message):"Controlla la tua email e apri il link ricevuto.")} 
-async function signOut(){if(SB)await SB.auth.signOut();currentUser=null;currentProfile=null;location.reload()}
-async function ensureProfile(){if(!SB||!currentUser)return;await SB.rpc("sync_my_role");await SB.rpc("touch_my_profile");const {data}=await SB.from("profiles").select("*").eq("id",currentUser.id).maybeSingle();currentProfile=data||{role:"student",email:currentUser.email||""};updateAuthUI()}
-async function initAuth(){if(!SB){authView("Il servizio di accesso non è disponibile. Ricarica la pagina.");return;}const {data:{session}}=await SB.auth.getSession();currentUser=session?.user||null;if(!currentUser){authView();return;}await ensureProfile();await loadRemoteProgress();document.querySelector(".bottom-nav").style.display="grid";updateAuthUI();home()}
+const state={score:0,answered:0,correct:0,completedLessons:[]};
 
+function normalizeEmail(v){return String(v||"").trim().toLowerCase()}
+function validEmail(v){return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)}
+function stateKey(){return "estimo_state:"+(currentUser?.email||"guest")}
+function updateAuthUI(){const b=$("#authBtn");if(!b)return;if(!currentUser){b.textContent="Accedi";b.className="account-btn";return}const t=currentProfile?.role==="teacher";b.textContent=t?"👩‍🏫 Docente":"👤 Studente";b.className="account-btn "+(t?"teacher":"student")}
+function loadLocalState(){const raw=JSON.parse(localStorage.getItem(stateKey())||"{}");state.score=+raw.score||0;state.answered=+raw.answered||0;state.correct=+raw.correct||0;state.completedLessons=Array.isArray(raw.completedLessons)?raw.completedLessons:[]}
+function persistLocalState(){localStorage.setItem(stateKey(),JSON.stringify(state))}
+function saveState(){persistLocalState();syncProgress().catch(()=>{})}
+async function api(payload){const r=await fetch(API_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});let data={};try{data=await r.json()}catch{}if(!r.ok)throw new Error(data.error||"Errore di collegamento");return data}
+async function syncProgress(){if(!currentUser)return;const c=ch();await api({action:"save_progress",email:currentUser.email,chapter_id:c.id,completed_lessons:state.completedLessons.filter(x=>x.startsWith(c.id+":")),answered:state.answered,correct:state.correct,score:state.score})}
+function applyRemoteProgress(rows){const c=ch();const data=(rows||[]).find(x=>x.chapter_id===c.id);if(!data)return false;state.answered=data.answered||0;state.correct=data.correct||0;state.score=data.score||0;const other=state.completedLessons.filter(x=>!x.startsWith(c.id+":"));state.completedLessons=other.concat(Array.isArray(data.completed_lessons)?data.completed_lessons:[]);persistLocalState();return true}
+async function recordAttempt(mode,score,total){if(!currentUser)return;await api({action:"save_attempt",email:currentUser.email,chapter_id:ch().id,mode,score,total})}
+function authView(message=""){currentUser=null;currentProfile=null;updateAuthUI();document.querySelector(".bottom-nav").style.display="none";app.innerHTML=`<section class="hero"><div class="kicker">Accesso immediato</div><h1>ESTIMO LAB</h1><p>Nessuna verifica via email: inserisci l'indirizzo e premi Entra.</p></section><div class="card auth-card"><h3>Entra nell'app</h3><p class="small">L'email serve solo per associare progressi e risultati. Non riceverai messaggi e non devi aprire nessun link.</p><label>Email</label><input id="loginEmail" type="email" autocomplete="email" placeholder="nome@scuola.it"><button class="primary" style="margin-top:12px" onclick="loginNow()">Entra</button>${message?`<div class="feedback">${esc(message)}</div>`:""}</div>`}
+async function loginNow(){const email=normalizeEmail($("#loginEmail")?.value);if(!validEmail(email)){authView("Inserisci un indirizzo email valido.");return}try{const data=await api({action:"start",email});currentUser={email};currentProfile={email,role:data.role||"student"};localStorage.setItem("estimo_email",email);loadLocalState();if(!applyRemoteProgress(data.progress))syncProgress().catch(()=>{});document.querySelector(".bottom-nav").style.display="grid";updateAuthUI();home()}catch(e){authView(e.message||"Accesso non riuscito.")}}
+async function signOut(){localStorage.removeItem("estimo_email");sessionStorage.removeItem("estimo_teacher_pin");currentUser=null;currentProfile=null;state.score=0;state.answered=0;state.correct=0;state.completedLessons=[];authView()}
+async function initAccess(){const email=normalizeEmail(localStorage.getItem("estimo_email"));if(!email){authView();return}try{const data=await api({action:"start",email});currentUser={email};currentProfile={email,role:data.role||"student"};loadLocalState();if(!applyRemoteProgress(data.progress))syncProgress().catch(()=>{});document.querySelector(".bottom-nav").style.display="grid";updateAuthUI();home()}catch(e){authView("Non riesco a collegarmi ai dati. Riprova.")}}
 function ch(){return chapters.find(x=>x.id===currentChapter)||chapters[0]}function shuffle(a){return [...a].sort(()=>Math.random()-.5)}function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[m]))}
 function markLesson(id){if(!state.completedLessons.includes(id)){state.completedLessons.push(id);saveState()}}
 function home(){const c=ch(),done=state.completedLessons.filter(x=>x.startsWith(c.id+":")).length,pct=Math.round(done/c.lessons.length*100);app.innerHTML=`
@@ -48,36 +53,36 @@ function calcMenu(){app.innerHTML=`<div class="section-title"><h2>Calcola</h2><s
 <div class="card calc-form"><h3>Trasformazione</h3><span class="formula">Vt = Vm − K</span><div class="formula-key"><b>Vt</b> = valore di trasformazione<br><b>Vm</b> = valore di mercato del bene trasformato<br><b>K</b> = costo della trasformazione</div><label>Vm (€)</label><input id="vm" type="number" value="250000"><label>K (€)</label><input id="k" type="number" value="90000"><button class="primary" style="margin-top:12px" onclick="calcTrans()">Calcola</button><div id="r3"></div></div>
 <div class="card calc-form"><h3>Complementare</h3><span class="formula">VA = V − VB</span><div class="formula-key"><b>VA</b> = valore della parte da stimare<br><b>V</b> = valore del complesso originario<br><b>VB</b> = valore del complesso senza la parte da stimare</div><label>V (€)</label><input id="v" type="number" value="400000"><label>VB (€)</label><input id="vb" type="number" value="310000"><button class="primary" style="margin-top:12px" onclick="calcComp()">Calcola</button><div id="r4"></div></div></div>`}
 function fmt(n){return new Intl.NumberFormat("it-IT",{style:"currency",currency:"EUR",maximumFractionDigits:2}).format(n)}function calcComparison(){let a=+$("#sumV").value,b=+$("#sumP").value,p=+$("#px").value;$("#r1").innerHTML=`<div class="result">${fmt(a)} / ${b} = ${fmt(a/b)}<br><b>Vx = ${fmt((a/b)*p)}</b></div>`}function calcCap(){let bf=+$("#bf").value,r=+$("#r").value/100;$("#r2").innerHTML=`<div class="result"><b>V₀ = ${fmt(bf/r)}</b></div>`}function calcTrans(){let vm=+$("#vm").value,k=+$("#k").value;$("#r3").innerHTML=`<div class="result"><b>Vt = ${fmt(vm-k)}</b></div>`}function calcComp(){let v=+$("#v").value,vb=+$("#vb").value;$("#r4").innerHTML=`<div class="result"><b>VA = ${fmt(v-vb)}</b></div>`}
-function progress(){const c=ch(),done=state.completedLessons.filter(x=>x.startsWith(c.id+":")).length,acc=state.answered?Math.round(state.correct/state.answered*100):0;app.innerHTML=`<div class="section-title"><h2>Progressi</h2><small>salvati sul dispositivo</small></div><div class="stats"><div class="stat"><b>${done}/${c.lessons.length}</b><span>lezioni</span></div><div class="stat"><b>${state.answered}</b><span>risposte</span></div><div class="stat"><b>${acc}%</b><span>corrette</span></div></div><div class="card" style="margin-top:12px"><h3>Punti</h3><div class="bigscore">${state.score}</div></div>`}
+function progress(){const c=ch(),done=state.completedLessons.filter(x=>x.startsWith(c.id+":")).length,acc=state.answered?Math.round(state.correct/state.answered*100):0;app.innerHTML=`<div class="section-title"><h2>Progressi</h2><small>associati alla tua email</small></div><div class="stats"><div class="stat"><b>${done}/${c.lessons.length}</b><span>lezioni</span></div><div class="stat"><b>${state.answered}</b><span>risposte</span></div><div class="stat"><b>${acc}%</b><span>corrette</span></div></div><div class="card" style="margin-top:12px"><h3>Punti</h3><div class="bigscore">${state.score}</div></div>`}
 document.querySelectorAll("[data-nav]").forEach(b=>b.addEventListener("click",()=>{const n=b.dataset.nav;if(n==="home")home();if(n==="study")study();if(n==="quiz")quizMenu();if(n==="calc")calcMenu();if(n==="progress")progress()}));$("#homeBtn").addEventListener("click",home);$("#authBtn")?.addEventListener("click",showAccount);if("serviceWorker"in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));home();
-async function teacherDashboard(){
-  if(currentProfile?.role!=="teacher"){home();return;}
-  app.innerHTML='<div class="section-title"><h2>Area docente</h2><small>caricamento dati...</small></div>';
-  const [{data:profiles,error:pe},{data:attempts,error:ae},{data:progress,error:pre}]=await Promise.all([
-    SB.from("profiles").select("id,email,full_name,role,last_seen_at,created_at").order("email"),
-    SB.from("quiz_attempts").select("user_id,chapter_id,mode,score,total,correct,created_at").order("created_at",{ascending:false}).limit(500),
-    SB.from("study_progress").select("user_id,chapter_id,answered,correct,score,updated_at").order("updated_at",{ascending:false})
-  ]);
-  if(pe||ae||pre){app.innerHTML='<div class="card"><h3>Errore</h3><p>Non riesco a caricare i dati docente.</p></div>';return;}
-  const students=(profiles||[]).filter(p=>p.role==="student");
-  const rows=students.map(s=>{
-    const at=(attempts||[]).filter(x=>x.user_id===s.id);
-    const pr=(progress||[]).find(x=>x.user_id===s.id&&x.chapter_id===ch().id);
-    const avg=at.length?Math.round(at.reduce((sum,x)=>sum+(x.total?x.score/x.total*100:0),0)/at.length):0;
-    return {s,at,pr,avg};
-  });
-  app.innerHTML=`<div class="section-title"><h2>Area docente</h2><small>${rows.length} studenti</small></div>
-  <div class="card teacher-summary"><b>Capitolo:</b> ${esc(ch().shortTitle)}<br><b>Tentativi registrati:</b> ${(attempts||[]).length}</div>
-  <div class="teacher-table-wrap"><table class="teacher-table"><thead><tr><th>Studente</th><th>Tentativi</th><th>Media quiz</th><th>Risposte</th><th>Corrette</th><th>Ultima attività</th></tr></thead><tbody>
-  ${rows.map(r=>`<tr><td>${esc(r.s.full_name||r.s.email)}</td><td>${r.at.length}</td><td>${r.avg}%</td><td>${r.pr?.answered||0}</td><td>${r.pr?.correct||0}</td><td>${esc((r.pr?.updated_at||r.s.last_seen_at||"").replace("T"," ").slice(0,16))}</td></tr>`).join("")}
-  </tbody></table></div>`;
-}
 
+function teacherGate(message=""){
+  app.innerHTML=`<div class="section-title"><h2>Area docente</h2><small>accesso riservato</small></div><div class="card auth-card"><h3>Codice docente</h3><p class="small">Gli studenti non devono usare questo codice. Serve solo a proteggere i loro dati e risultati.</p><label>Codice</label><input id="teacherPin" type="password" inputmode="numeric" autocomplete="off" placeholder="6 cifre"><button class="primary" style="margin-top:12px" onclick="unlockTeacher()">Apri Area docente</button>${message?`<div class="feedback">${esc(message)}</div>`:""}</div>`;
+}
+async function unlockTeacher(){const pin=String($("#teacherPin")?.value||"").trim();if(!pin){teacherGate("Inserisci il codice docente.");return}await teacherDashboard(pin)}
+async function teacherDashboard(pinArg){
+  if(currentProfile?.role!=="teacher"){home();return}
+  const pin=pinArg||sessionStorage.getItem("estimo_teacher_pin")||"";
+  if(!pin){teacherGate();return}
+  app.innerHTML='<div class="section-title"><h2>Area docente</h2><small>caricamento dati...</small></div>';
+  try{
+    const data=await api({action:"dashboard",email:currentUser.email,pin});
+    sessionStorage.setItem("estimo_teacher_pin",pin);
+    const students=data.users||[],attempts=data.attempts||[],progressRows=data.progress||[];
+    const rows=students.map(s=>{
+      const at=attempts.filter(x=>x.email===s.email);
+      const pr=progressRows.find(x=>x.email===s.email&&x.chapter_id===ch().id);
+      const avg=at.length?Math.round(at.reduce((sum,x)=>sum+(x.total?x.score/x.total*100:0),0)/at.length):0;
+      return {s,at,pr,avg};
+    });
+    app.innerHTML=`<div class="section-title"><h2>Area docente</h2><small>${rows.length} studenti</small></div>
+    <div class="card teacher-summary"><b>Capitolo:</b> ${esc(ch().shortTitle)}<br><b>Tentativi registrati:</b> ${attempts.length}<br><b>Studenti registrati:</b> ${rows.length}</div>
+    <div class="teacher-table-wrap"><table class="teacher-table"><thead><tr><th>Studente</th><th>Tentativi</th><th>Media quiz</th><th>Risposte</th><th>Corrette</th><th>Primo accesso</th><th>Ultima attività</th></tr></thead><tbody>
+    ${rows.map(r=>`<tr><td>${esc(r.s.email)}</td><td>${r.at.length}</td><td>${r.avg}%</td><td>${r.pr?.answered||0}</td><td>${r.pr?.correct||0}</td><td>${esc((r.s.created_at||"").replace("T"," ").slice(0,16))}</td><td>${esc((r.pr?.updated_at||r.s.last_seen_at||"").replace("T"," ").slice(0,16))}</td></tr>`).join("")}
+    </tbody></table></div><button class="secondary" style="margin-top:12px" onclick="home()">Torna alla Home</button>`;
+  }catch(e){sessionStorage.removeItem("estimo_teacher_pin");teacherGate(e.message||"Accesso docente non riuscito.")}
+}
 async function showAccount(){
-  if(!SB){authView("Il servizio di accesso non è disponibile. Ricarica la pagina.");return;}
-  const {data:{session}}=await SB.auth.getSession();
-  if(!session){authView();return;}
-  currentUser=session.user;
-  await ensureProfile();
-  app.innerHTML=`<div class="section-title"><h2>Profilo</h2><small>Accesso attivo</small></div><div class="card profile-card"><div class="profile-role">${currentProfile?.role==="teacher"?"👩‍🏫 INSEGNANTE":"👤 STUDENTE"}</div><p><b>Email:</b> ${esc(currentUser.email||"")}</p><p class="small">${currentProfile?.role==="teacher"?"Questo account può vedere l'Area docente e i progressi degli studenti.":"Questo account salva i propri progressi e i risultati dei quiz."}</p>${currentProfile?.role==="teacher"?'<button class="primary" onclick="teacherDashboard()">Apri Area docente</button>':""}<button class="secondary" style="margin-top:10px" onclick="home()">Torna alla Home</button><button class="secondary" style="margin-top:10px" onclick="signOut()">Esci</button></div>`;
+  if(!currentUser){authView();return}
+  app.innerHTML=`<div class="section-title"><h2>Profilo</h2><small>Accesso attivo</small></div><div class="card profile-card"><div class="profile-role">${currentProfile?.role==="teacher"?"👩‍🏫 INSEGNANTE":"👤 STUDENTE"}</div><p><b>Email:</b> ${esc(currentUser.email||"")}</p><p class="small">${currentProfile?.role==="teacher"?"Il tuo account è riconosciuto come docente. L'Area docente è protetta da un codice separato.":"I progressi e i risultati sono associati a questa email senza verifica via posta."}</p>${currentProfile?.role==="teacher"?'<button class="primary" onclick="teacherDashboard()">Apri Area docente</button>':""}<button class="secondary" style="margin-top:10px" onclick="home()">Torna alla Home</button><button class="secondary" style="margin-top:10px" onclick="signOut()">Cambia email / Esci</button></div>`;
 }
